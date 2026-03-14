@@ -1,0 +1,105 @@
+# .github/workflows/ci-cd.yml
+#
+# Full CI/CD pipeline: Code → Build → Test → Package → Deploy
+#
+# Required GitHub Secrets (Settings → Secrets → Actions):
+#   DOCKERHUB_USERNAME   your Docker Hub username
+#   DOCKERHUB_TOKEN      Docker Hub access token (not your password)
+#   RENDER_DEPLOY_URL    the Deploy Hook URL from your Render service
+#
+# Optional GitHub Variables (Settings → Variables → Actions):
+#   APP_VERSION          e.g. "1.2.0" — shown on the live site
+#   BANNER_MESSAGE       e.g. "Lecture 8 live demo! 🎉"
+#   CARD_COLOR           e.g. "#27AE60"
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]   # runs CI (build + test) but NOT deploy
+
+env:
+  # IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/cicd-demo
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/devops-quiz-ai
+
+jobs:
+
+  # ── Job 1: Build, Test, Push ─────────────────────────────────────────────
+  build-and-push:
+    name: Build · Test · Push
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # 1. Get the source code
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2. Log in to Docker Hub using encrypted secrets
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 3. Build the image and tag it with both the commit SHA and "latest"
+      - name: Build Docker image
+        run: |
+          docker build \
+            -t $IMAGE_NAME:${{ github.sha }} \
+            -t $IMAGE_NAME:latest \
+            .
+
+      # 4. Smoke test — start the container, wait, then hit /health
+      - name: Smoke test
+        run: |
+          docker run --rm -d \
+            --name test-container \
+            -p 5000:5000 \
+            -e APP_VERSION="${{ vars.APP_VERSION || '1.0.0' }}" \
+            -e BANNER_MESSAGE="${{ vars.BANNER_MESSAGE || 'CI test run' }}" \
+            $IMAGE_NAME:latest
+
+          # Give gunicorn a moment to start
+          sleep 4
+
+          # Assert /health returns HTTP 200
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5000/health)
+          echo "Health check status: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "❌ Health check failed!"
+            docker logs test-container
+            exit 1
+          fi
+          echo "✅ Health check passed"
+          docker stop test-container
+
+      # 5. Push to Docker Hub (only on pushes to main, not on PRs)
+      - name: Push to Docker Hub
+        if: github.event_name == 'push'
+        run: |
+          docker push $IMAGE_NAME:${{ github.sha }}
+          docker push $IMAGE_NAME:latest
+
+  # ── Job 2: Deploy to Render ──────────────────────────────────────────────
+  deploy:
+    name: Deploy to Render
+    runs-on: ubuntu-latest
+    needs: build-and-push          # only runs after job 1 succeeds
+    if: github.event_name == 'push'   # skip on PRs
+
+    steps:
+
+      - name: Trigger Render deploy
+        run: |
+          echo "🚀 Triggering deploy on Render..."
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "${{ secrets.RENDER_DEPLOY_URL }}")
+          echo "Render response: $HTTP_STATUS"
+          if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "201" ]; then
+            echo "❌ Deploy trigger failed (HTTP $HTTP_STATUS)"
+            exit 1
+          fi
+          echo "✅ Deploy triggered successfully"
