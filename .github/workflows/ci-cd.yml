@@ -65,8 +65,8 @@ jobs:
           # Give gunicorn a moment to start
           sleep 4
 
-          # Assert /health returns HTTP 200
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5000/health)
+          # Assert /api/health returns HTTP 200
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5000/api/health)
           echo "Health check status: $STATUS"
           if [ "$STATUS" != "200" ]; then
             echo "❌ Health check failed!"
